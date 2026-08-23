@@ -1,64 +1,83 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_web::{body::to_bytes, test};
+use axum::body::Body;
+use axum::http::Request;
+use tower::ServiceExt;
 
 use super::utils::*;
 
-#[test]
+#[tokio::test]
 async fn basic_site_config() {
     let test = "basic";
     let conf = default_config(test);
     let (_tempdir, app) = create_app(&conf, test).await;
 
-    let req = test::TestRequest::get().uri("/api/siteurl").to_request();
-    let resp = test::call_service(&app, req).await;
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    assert_eq!(body.as_str(), conf.site_url.unwrap());
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/siteurl").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_string(resp).await, conf.site_url.clone().unwrap());
 
-    let req = test::TestRequest::get().uri("/api/whoami").to_request();
-    let resp = test::call_service(&app, req).await;
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    assert_eq!(body.as_str(), "nobody");
-    let req = test::TestRequest::get()
-        .uri("/api/whoami")
-        .insert_header(("X-API-Key", conf.api_key.clone().unwrap()))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    assert_eq!(body.as_str(), "admin");
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/whoami").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_string(resp).await, "nobody");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get("/api/whoami")
+                .header("X-API-Key", conf.api_key.clone().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_string(resp).await, "admin");
 
-    let req = test::TestRequest::get().uri("/api/version").to_request();
-    let resp = test::call_service(&app, req).await;
-    let body = to_bytes(resp.into_body()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/version").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert!(
-        body.as_str()
+        body_string(resp)
+            .await
             .starts_with(concat!("Chhoto URL v", env!("CARGO_PKG_VERSION")))
     );
 
-    let req = test::TestRequest::get()
-        .uri("/api/getconfig")
-        .insert_header(("X-API-Key", conf.api_key.unwrap()))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get("/api/getconfig")
+                .header("X-API-Key", conf.api_key.unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(resp.status().is_success());
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    let conf: BackendConfig = serde_json::from_str(body.as_str()).unwrap();
+    let conf: BackendConfig = serde_json::from_str(&body_string(resp).await).unwrap();
     assert!(conf.version.starts_with(env!("CARGO_PKG_VERSION")));
     assert_eq!(conf.slug_length, 8);
 }
 
-#[test]
+#[tokio::test]
 async fn auth_verification() {
     let test = "auth_verification";
     let conf = default_config(test);
     let (_tempdir, app) = create_app(&conf, test).await;
 
-    let req = test::TestRequest::get().uri("/api/all").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/all").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    assert_eq!(body.as_str(), "Unauthorized");
+    assert_eq!(body_string(resp).await, "Unauthorized");
 
     let status = edit_link(&app, "a", "test2", false, None, None).await;
     assert_eq!(status, 401);
@@ -67,13 +86,21 @@ async fn auth_verification() {
     assert_eq!(status, 401);
     assert_eq!(reply.reason, "API validation failed.");
 
-    let req = test::TestRequest::delete()
-        .uri("/api/del/link")
-        .to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::delete("/api/del/link")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
 
-    let req = test::TestRequest::get().uri("/api/getconfig").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/getconfig").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
 }

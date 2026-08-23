@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_web::test;
+use axum::body::Body;
+use axum::http::Request;
 use tokio::time::{Duration, sleep};
+use tower::ServiceExt;
 
 use super::utils::*;
 
-#[test]
+#[tokio::test]
 async fn link_resolution() {
     let test = "link-resolution";
     let conf = default_config(test);
@@ -14,8 +16,11 @@ async fn link_resolution() {
     let (status, _) = add_link(&app, &conf.api_key.unwrap(), "test1", 10, "").await;
     assert!(status.is_success());
 
-    let req = test::TestRequest::get().uri("/test1").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/test1").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert!(resp.status().is_redirection());
     assert_eq!(
         resp.headers().get("location").unwrap(),
@@ -23,7 +28,7 @@ async fn link_resolution() {
     );
 }
 
-#[test]
+#[tokio::test]
 async fn link_deletion() {
     let test = "link-deletion";
     let conf = default_config(test);
@@ -32,16 +37,20 @@ async fn link_deletion() {
     let (status, _) = add_link(&app, &api_key, "test2", 10, "").await;
     assert!(status.is_success());
 
-    let req = test::TestRequest::delete()
-        .uri("/api/del/test2")
-        .insert_header(("X-API-Key", conf.api_key.unwrap()))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::delete("/api/del/test2")
+                .header("X-API-Key", conf.api_key.unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(resp.status().is_success());
 }
 
-#[test]
+#[tokio::test]
 async fn data_fetching_all() {
     let test = "data-fetching-all";
     let conf = default_config(test);
@@ -49,8 +58,11 @@ async fn data_fetching_all() {
     let api_key = conf.api_key.clone().unwrap();
     let _ = add_link(&app, &api_key, "test1", 10, "").await;
     let _ = add_link(&app, &api_key, "test3", 10, "").await;
-    let req = test::TestRequest::get().uri("/test1").to_request();
-    let _ = test::call_service(&app, req).await;
+    let _ = app
+        .clone()
+        .oneshot(Request::get("/test1").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
 
     let timer = Duration::from_millis(800);
     tokio::time::sleep(timer).await;
@@ -78,7 +90,7 @@ async fn data_fetching_all() {
     assert_eq!(reply[0].shortlink, "test1");
 }
 
-#[test]
+#[tokio::test]
 async fn expand_link() {
     let test = "expand-link";
     let conf = default_config(test);
@@ -92,7 +104,7 @@ async fn expand_link() {
     assert_eq!(reply.notes, "test-note");
 }
 
-#[test]
+#[tokio::test]
 async fn link_expiry() {
     let test = "link-expiry";
     let conf = default_config(test);
@@ -104,8 +116,11 @@ async fn link_expiry() {
     let one_second = Duration::from_secs(1);
     sleep(one_second).await;
 
-    let req = test::TestRequest::get().uri("/test1").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/test1").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert!(resp.status().is_client_error());
 
     let (status, _) = expand(&app, &api_key, "test1").await;
@@ -115,7 +130,7 @@ async fn link_expiry() {
     assert!(status.is_success());
 }
 
-#[test]
+#[tokio::test]
 async fn notes_and_filtering() {
     let test = "notes-and-filtering";
     let conf = default_config(test);
@@ -140,7 +155,7 @@ async fn notes_and_filtering() {
     assert_eq!(reply[1].shortlink, "test2");
     assert_eq!(reply[0].notes, "note1");
 }
-#[test]
+#[tokio::test]
 async fn edit_expiry() {
     let test = "link-editing";
     let conf = default_config(test);
@@ -150,8 +165,11 @@ async fn edit_expiry() {
     let (status, _) = add_link(&app, &api_key, "test1", 10, "").await;
     assert!(status.is_success());
 
-    let req = test::TestRequest::get().uri("/test1").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/test1").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert!(resp.status().is_redirection());
 
     let status = edit_link(&app, &api_key, "test1", false, None, None).await;

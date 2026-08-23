@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_files::NamedFile;
-use actix_web::{
-    Either, HttpResponse, Responder, get,
-    http::StatusCode,
-    web::{self, Redirect},
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Redirect, Response},
 };
 
 use crate::{
@@ -21,58 +23,61 @@ use crate::{
 };
 
 // Return all active links
-#[get("/api/all")]
 pub(crate) async fn getall(
     auth: Auth,
-    data: web::Data<AppState>,
-    params: web::Query<GetReqParams>,
-) -> HttpResponse {
+    State(data): State<Arc<AppState>>,
+    Query(params): Query<GetReqParams>,
+) -> Response {
     match auth {
-        Auth::None { result: _ } => HttpResponse::Unauthorized()
-            .content_type("text/plain")
-            .body("Unauthorized"),
-        Auth::InvalidAPIKey { result } => HttpResponse::Unauthorized()
-            .content_type("text/plain")
-            .body(result.reason),
-        _ => match utils::getall_helper(&data.reader, params.into_inner()) {
-            Ok(s) => HttpResponse::Ok().content_type("application/json").body(s),
-            Err(ServerError) => HttpResponse::InternalServerError()
-                .content_type("text/plain")
-                .body("Something went wrong while loading the links.".to_owned()),
-            Err(ClientError { reason }) => HttpResponse::BadRequest()
-                .content_type("text/plain")
-                .body(reason),
-        },
+        Auth::None { result: _ } => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+        Auth::InvalidAPIKey { result } => {
+            (StatusCode::UNAUTHORIZED, result.reason).into_response()
+        }
+        _ => {
+            let reader = data.reader.lock().await;
+            match utils::getall_helper(&reader, params) {
+                Ok(s) => (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    s,
+                )
+                    .into_response(),
+                Err(ServerError) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Something went wrong while loading the links.",
+                )
+                    .into_response(),
+                Err(ClientError { reason }) => {
+                    (StatusCode::BAD_REQUEST, reason).into_response()
+                }
+            }
+        }
     }
 }
 
 // Get the site URL
 // This is deprecated, and might be removed in the future.
 // Use /api/getconfig instead
-#[get("/api/siteurl")]
-pub(crate) async fn siteurl(data: web::Data<AppState>) -> HttpResponse {
+pub(crate) async fn siteurl(State(data): State<Arc<AppState>>) -> Response {
     if let Some(url) = &data.config.site_url {
-        HttpResponse::Ok()
-            .content_type("text/plain")
-            .body(url.clone())
+        (StatusCode::OK, url.clone()).into_response()
     } else {
-        HttpResponse::Ok().content_type("text/plain").body("unset")
+        (StatusCode::OK, "unset").into_response()
     }
 }
 
 // Get the version number
 // This is deprecated, and might be removed in the future.
 // Use /api/getconfig instead
-#[get("/api/version")]
-pub(crate) async fn version() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body(format!("Chhoto URL v{}", utils::get_version()))
+pub(crate) async fn version() -> Response {
+    (
+        StatusCode::OK,
+        format!("Chhoto URL v{}", utils::get_version()),
+    )
+        .into_response()
 }
 
 // Get the user's current role
-#[get("/api/whoami")]
-pub(crate) async fn whoami(data: web::Data<AppState>, auth: Auth) -> HttpResponse {
+pub(crate) async fn whoami(State(data): State<Arc<AppState>>, auth: Auth) -> Response {
     let config = &data.config;
     let acting_user = match auth {
         Auth::ValidAPIKey | Auth::ValidSession => "admin",
@@ -84,14 +89,11 @@ pub(crate) async fn whoami(data: web::Data<AppState>, auth: Auth) -> HttpRespons
             }
         }
     };
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body(acting_user)
+    (StatusCode::OK, acting_user).into_response()
 }
 
 // Get some useful backend config
-#[get("/api/getconfig")]
-pub(crate) async fn getconfig(auth: Auth, data: web::Data<AppState>) -> HttpResponse {
+pub(crate) async fn getconfig(auth: Auth, State(data): State<Arc<AppState>>) -> Response {
     let config = &data.config;
     let ok_response = || {
         let backend_config = BackendConfig {
@@ -106,7 +108,7 @@ pub(crate) async fn getconfig(auth: Auth, data: web::Data<AppState>) -> HttpResp
             try_longer_slug: config.try_longer_slug,
             frontend_page_size: config.frontend_page_size,
         };
-        HttpResponse::Ok().json(backend_config)
+        (StatusCode::OK, Json(backend_config)).into_response()
     };
     match auth {
         Auth::ValidSession | Auth::ValidAPIKey => ok_response(),
@@ -114,34 +116,28 @@ pub(crate) async fn getconfig(auth: Auth, data: web::Data<AppState>) -> HttpResp
             if data.config.public_mode {
                 ok_response()
             } else {
-                HttpResponse::Unauthorized().json(result)
+                (StatusCode::UNAUTHORIZED, Json(result)).into_response()
             }
         }
     }
 }
 
 // Handle a given shortlink
-#[get("/{shortlink}")]
 pub(crate) async fn link_handler(
-    shortlink: web::Path<String>,
-    data: web::Data<AppState>,
-) -> impl Responder {
-    let shortlink_str = shortlink.as_str();
-    if let Ok(longlink) =
-        database::find_and_add_hit(shortlink_str, &data.reader, &data.hits_tx).await
-    {
+    Path(shortlink): Path<String>,
+    State(data): State<Arc<AppState>>,
+) -> Response {
+    let reader = data.reader.lock().await;
+    if let Ok(longlink) = database::find_and_add_hit(&shortlink, &reader, &data.hits_tx) {
+        drop(reader);
         if data.config.use_temp_redirect {
-            Either::Left(Redirect::to(longlink))
+            Redirect::temporary(&longlink).into_response()
         } else {
             // Defaults to permanent redirection
-            Either::Left(Redirect::to(longlink).permanent())
+            Redirect::permanent(&longlink).into_response()
         }
     } else {
-        Either::Right(
-            NamedFile::open_async("./frontend/static/404.html")
-                .await
-                .customize()
-                .with_status(StatusCode::NOT_FOUND),
-        )
+        drop(reader);
+        utils::error404().await
     }
 }

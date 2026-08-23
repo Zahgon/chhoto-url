@@ -1,9 +1,16 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_session::Session;
-use actix_web::{HttpResponse, delete, web};
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use log::info;
+use tower_sessions::Session;
 
 use crate::{
     AppState,
@@ -17,27 +24,25 @@ use crate::{
 
 // Handle logout
 // There's no reason to be calling this route with an API key
-#[delete("/api/logout")]
-pub(crate) async fn logout(session: Session) -> HttpResponse {
-    if session.remove("chhoto-url-auth").is_some() {
+pub(crate) async fn logout(session: Session) -> Response {
+    if matches!(session.remove::<String>("chhoto-url-auth").await, Ok(Some(_))) {
         info!("Successful logout.");
-        HttpResponse::Ok()
-            .content_type("text/plain")
-            .body("Logged out!")
+        (StatusCode::OK, "Logged out!").into_response()
     } else {
-        HttpResponse::Unauthorized()
-            .content_type("text/plain")
-            .body("You don't seem to be logged in.")
+        (
+            StatusCode::UNAUTHORIZED,
+            "You don't seem to be logged in.",
+        )
+            .into_response()
     }
 }
 
 // Delete a given shortlink
-#[delete("/api/del/{shortlink}")]
 pub(crate) async fn delete_link(
-    shortlink: web::Path<String>,
+    Path(shortlink): Path<String>,
     auth: Auth,
-    data: web::Data<AppState>,
-) -> HttpResponse {
+    State(data): State<Arc<AppState>>,
+) -> Response {
     match auth {
         Auth::ValidAPIKey => {
             match utils::delete_link_helper(
@@ -51,7 +56,7 @@ pub(crate) async fn delete_link(
                         error: false,
                         reason: format!("Deleted {shortlink}"),
                     };
-                    HttpResponse::Ok().json(response)
+                    (StatusCode::OK, Json(response)).into_response()
                 }
                 Err(ServerError) => {
                     let response = JSONResponse {
@@ -59,7 +64,7 @@ pub(crate) async fn delete_link(
                         error: true,
                         reason: "Something went wrong when deleting the link.".to_owned(),
                     };
-                    HttpResponse::InternalServerError().json(response)
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(response)).into_response()
                 }
                 Err(ClientError { reason }) => {
                     let response = JSONResponse {
@@ -67,11 +72,11 @@ pub(crate) async fn delete_link(
                         error: true,
                         reason,
                     };
-                    HttpResponse::NotFound().json(response)
+                    (StatusCode::NOT_FOUND, Json(response)).into_response()
                 }
             }
         }
-        Auth::InvalidAPIKey { result } => HttpResponse::Unauthorized().json(result),
+        Auth::InvalidAPIKey { result } => (StatusCode::UNAUTHORIZED, Json(result)).into_response(),
         // If using password - keeps backwards compatibility
         Auth::ValidSession => {
             if utils::delete_link_helper(
@@ -81,15 +86,11 @@ pub(crate) async fn delete_link(
             )
             .is_ok()
             {
-                HttpResponse::Ok()
-                    .content_type("text/plain")
-                    .body(format!("Deleted {shortlink}"))
+                (StatusCode::OK, format!("Deleted {shortlink}")).into_response()
             } else {
-                HttpResponse::NotFound()
-                    .content_type("text/plain")
-                    .body("Not found!")
+                (StatusCode::NOT_FOUND, "Not found!").into_response()
             }
         }
-        Auth::None { result: _ } => HttpResponse::Unauthorized().body("Not logged in!"),
+        Auth::None { result: _ } => (StatusCode::UNAUTHORIZED, "Not logged in!").into_response(),
     }
 }

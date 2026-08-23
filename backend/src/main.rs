@@ -1,14 +1,6 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_files::Files;
-use actix_session::{SessionMiddleware, config::PersistentSession, storage::CookieSessionStore};
-use actix_web::{
-    App, HttpServer,
-    cookie::{self, Key},
-    middleware,
-    web::{self, Redirect},
-};
 use log::info;
 use rusqlite::Connection;
 use std::{
@@ -16,6 +8,7 @@ use std::{
     sync::{Arc, Once},
 };
 use tokio::sync::{Mutex, mpsc};
+use tower::Layer;
 
 // Import modules
 mod auth;
@@ -33,21 +26,23 @@ mod tests;
 // This struct represents state
 struct AppState {
     hits_tx: mpsc::Sender<(String, bool)>,
-    reader: Connection,
+    // Wrapped in a Mutex because rusqlite's Connection is !Sync, and Axum
+    // handlers require Send + Sync shared state.
+    reader: Mutex<Connection>,
     writer: Arc<Mutex<Connection>>,
     config: config::Config,
 }
 
 static LOGGER: Once = Once::new();
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> Result<()> {
     env_logger::builder()
         .parse_filters(
             std::env::var("RUST_LOG")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .unwrap_or("warn,chhoto_url=info,actix_session::middleware=error".to_owned())
+                .unwrap_or("warn,chhoto_url=info,tower_http=info".to_owned())
                 .as_str(),
         )
         .format(|buf, record| {
@@ -68,9 +63,6 @@ async fn main() -> Result<()> {
             )
         })
         .init();
-
-    // Generate session key in runtime so that restart invalidates older logins
-    let secret_key = Key::generate();
 
     eprintln!("----------------------------------------------------------------------");
     info!("Starting Chhoto URL Server v{}", utils::get_version());
@@ -93,71 +85,32 @@ async fn main() -> Result<()> {
 
     let port = conf.port;
     let addr = conf.listen_address.clone();
-    // Actually start the server
-    HttpServer::new(move || {
-        let mut app = App::new()
-            .wrap(middleware::Logger::default())
-            .wrap(middleware::Compress::default())
-            .wrap(middleware::NormalizePath::new(
-                middleware::TrailingSlash::MergeOnly,
-            ))
-            .wrap(
-                SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
-                    .cookie_same_site(actix_web::cookie::SameSite::Strict)
-                    .session_lifecycle(
-                        PersistentSession::default().session_ttl(cookie::time::Duration::days(7)),
-                    )
-                    .cookie_secure(false)
-                    .build(),
-            )
-            // Maintain a single instance of database throughout
-            .app_data(web::Data::new(AppState {
-                hits_tx: hits_tx.clone(),
-                reader: database::open_db(&conf.db_location, true),
-                writer: Arc::clone(&writer),
-                config: conf.clone(),
-            }))
-            .wrap(if let Some(header) = &conf.cache_control_header {
-                middleware::DefaultHeaders::new().add(("Cache-Control", header.to_owned()))
-            } else {
-                middleware::DefaultHeaders::new()
-            })
-            .service(services::link_handler)
-            .service(services::edit_link)
-            .service(services::getall)
-            .service(services::siteurl)
-            .service(services::version)
-            .service(services::getconfig)
-            .service(services::add_links)
-            .service(services::delete_link)
-            .service(services::login)
-            .service(services::logout)
-            .service(services::expand)
-            .service(services::whoami);
 
-        if !conf.disable_frontend {
-            if let Some(dir) = &conf.custom_landing_directory {
-                app = app
-                    .service(Redirect::new("/admin/manage", "/admin/manage/"))
-                    .service(Files::new("/admin/manage/", "./frontend/").index_file("index.html"))
-                    .service(Files::new("/", dir).index_file("index.html"));
-            } else {
-                app = app.service(Files::new("/", "./frontend/").index_file("index.html"));
-            }
-        }
+    // Maintain a single instance of state throughout
+    let state = Arc::new(AppState {
+        hits_tx,
+        reader: Mutex::new(database::open_db(&conf.db_location, true)),
+        writer: Arc::clone(&writer),
+        config: conf.clone(),
+    });
 
-        app.default_service(actix_web::web::get().to(utils::error404))
-    })
+    // Build the router (routes + tower middleware + session layer)
+    let app = services::build_router(state, &conf);
+    // NormalizePath must wrap the whole router so it runs before routing.
+    let app = tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash().layer(app);
+
     // Hardcode the port the server listens to. Allows for more intuitive Docker Compose port management
-    .bind((&*addr, port))
-    .inspect(|_| {
-        LOGGER.call_once(|| {
-            info!(
-                "Server has started listening to {} on port {}.",
-                &addr, port
-            );
-        })
-    })?
-    .run()
+    let listener = tokio::net::TcpListener::bind((addr.as_str(), port)).await?;
+    LOGGER.call_once(|| {
+        info!(
+            "Server has started listening to {} on port {}.",
+            &addr, port
+        );
+    });
+
+    axum::serve(
+        listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service(app),
+    )
     .await
 }

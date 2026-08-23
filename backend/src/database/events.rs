@@ -139,7 +139,7 @@ pub(crate) fn getall(
 }
 
 // Resolve site and add link to add_hit queue
-pub(crate) async fn find_and_add_hit(
+pub(crate) fn find_and_add_hit(
     shortlink: &str,
     db: &Connection,
     hits_tx: &mpsc::Sender<(String, bool)>,
@@ -149,16 +149,14 @@ pub(crate) async fn find_and_add_hit(
         error!("Error preparing SQL statement for find link.");
         return Err(());
     };
-    let Ok(long_url) = statement
-        .query_one(named_params! {":short": shortlink, ":now": now}, |row| {
-            row.get("long_url")
-        })
-    else {
+    let Ok(long_url) = statement.query_one(named_params! {":short": shortlink, ":now": now}, |row| {
+        row.get::<_, String>("long_url")
+    }) else {
         return Err(());
     };
 
     debug!("Accessed link: {shortlink}.");
-    if let Err(err) = hits_tx.send((shortlink.to_owned(), false)).await {
+    if let Err(err) = hits_tx.try_send((shortlink.to_owned(), false)) {
         error!("Failed to enqueue hit update after access: {err}");
     }
     Ok(long_url)
@@ -276,7 +274,7 @@ pub(crate) fn add_links(
 }
 
 // Edit an existing link
-pub(crate) async fn edit_link(
+pub(crate) fn edit_link(
     shortlink: &str,
     longlink: &str,
     reset_hits: bool,
@@ -286,13 +284,13 @@ pub(crate) async fn edit_link(
     db: &Connection,
 ) -> Result<usize, ()> {
     let now = chrono::Utc::now().timestamp();
+    if reset_hits && let Err(err) = hits_tx.try_send((shortlink.to_owned(), true)) {
+        error!("Failed to enqueue hit update after edit: {err}");
+    }
     let Ok(mut statement) = db.prepare_cached(queries::EDIT_LINK) else {
         error!("Error preparing SQL statement for edit_link.");
         return Err(());
     };
-    if reset_hits && let Err(err) = hits_tx.send((shortlink.to_owned(), true)).await {
-        error!("Failed to enqueue hit update after edit: {err}");
-    }
     statement
         .execute(named_params! {
             ":long": longlink,

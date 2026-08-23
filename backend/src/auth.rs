@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_session::{Session, SessionExt};
-use actix_web::{Error, FromRequest, HttpRequest, dev::Payload, web};
 use argon2::{Argon2, PasswordVerifier, password_hash::PasswordHash};
+use axum::extract::FromRequestParts;
+use axum::http::{HeaderMap, request::Parts};
 use log::{debug, warn};
 use passwords::PasswordGenerator;
-use std::future::{Ready, ready};
+use std::sync::Arc;
 use std::{rc::Rc, time::SystemTime};
+use tower_sessions::Session;
 
 use crate::{
     AppState,
@@ -16,8 +17,8 @@ use crate::{
 };
 
 // Read API key from header and process it
-fn is_api_ok(req: &HttpRequest, config: &Config) -> JSONResponse {
-    let api_header = req.headers().get("X-API-Key").and_then(|h| h.to_str().ok());
+fn is_api_ok(headers: &HeaderMap, config: &Config) -> JSONResponse {
+    let api_header = headers.get("X-API-Key").and_then(|h| h.to_str().ok());
 
     // If the api_key environment variable exists
     if config.api_key.is_some() {
@@ -112,16 +113,15 @@ pub(crate) fn gen_key() -> String {
 }
 
 // Validate a session
-fn is_session_valid(session: Session, config: &Config) -> bool {
+async fn is_session_valid(session: &Session, config: &Config) -> bool {
     // If there's no password provided, just return true
     if config.password.is_none() {
         return true;
     }
 
-    if let Ok(token) = session.get::<String>("chhoto-url-auth") {
-        is_token_valid(token.as_deref())
-    } else {
-        false
+    match session.get::<String>("chhoto-url-auth").await {
+        Ok(token) => is_token_valid(token.as_deref()),
+        Err(_) => false,
     }
 }
 
@@ -153,32 +153,33 @@ pub(crate) enum Auth {
     None { result: JSONResponse },
     InvalidAPIKey { result: JSONResponse },
 }
-// Extractor for authentication
-impl FromRequest for Auth {
-    type Error = Error;
-    type Future = Ready<Result<Self, Self::Error>>;
 
-    fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        let config = &req
-            .app_data::<web::Data<AppState>>()
-            .expect("Appstate wasn't created yet. THIS SHOULD NEVER OCCUR!!!")
-            .config;
+// Extractor for authentication
+impl FromRequestParts<Arc<AppState>> for Auth {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let config = &state.config;
 
         // API key auth
-        let api_result = is_api_ok(req, config);
+        let api_result = is_api_ok(&parts.headers, config);
         if api_result.success {
-            return ready(Ok(Auth::ValidAPIKey));
+            return Ok(Auth::ValidAPIKey);
         } else if api_result.error {
-            return ready(Ok(Auth::InvalidAPIKey { result: api_result }));
+            return Ok(Auth::InvalidAPIKey { result: api_result });
         }
 
         // Session auth
-        let session = req.get_session();
-        if is_session_valid(session, config) {
-            return ready(Ok(Auth::ValidSession));
+        if let Ok(session) = Session::from_request_parts(parts, state).await
+            && is_session_valid(&session, config).await
+        {
+            return Ok(Auth::ValidSession);
         }
 
-        ready(Ok(Auth::None { result: api_result }))
+        Ok(Auth::None { result: api_result })
     }
 }
 

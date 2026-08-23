@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_files::NamedFile;
-use actix_web::{Responder, http::StatusCode};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use log::{debug, error};
 use nanoid::nanoid;
 use rand::{random_range, seq::IndexedRandom};
@@ -254,7 +254,7 @@ pub(super) fn add_links_helper(
 }
 
 // Make checks and then request the DB to edit an URL entry
-pub(super) async fn edit_link_helper(
+pub(super) fn edit_link_helper(
     req: &str,
     db: &Connection,
     hits_tx: &mpsc::Sender<(String, bool)>,
@@ -289,8 +289,7 @@ pub(super) async fn edit_link_helper(
         chunks.notes.filter(|s| !s.is_empty()).as_deref(),
         hits_tx,
         db,
-    )
-    .await;
+    );
     match result {
         // Zero rows returned means no updates
         Ok(0) => Err(ClientError {
@@ -397,9 +396,14 @@ fn gen_link(
 }
 
 // 404 error page
-pub(crate) async fn error404() -> impl Responder {
-    NamedFile::open_async("./frontend/static/404.html")
-        .await
-        .customize()
-        .with_status(StatusCode::NOT_FOUND)
+pub(crate) async fn error404() -> Response {
+    match tokio::fs::read("./frontend/static/404.html").await {
+        Ok(contents) => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/html")],
+            contents,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }

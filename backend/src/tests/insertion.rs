@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: 2023-2026 Sayantan Santra <sayantan.santra689@gmail.com>
 // SPDX-License-Identifier: MIT
 
-use actix_web::{body::to_bytes, test};
+use axum::body::Body;
+use axum::http::Request;
 use regex::Regex;
 use tokio::time::{Duration, sleep};
+use tower::ServiceExt;
 
 use super::utils::*;
 use crate::*;
 
-#[test]
+#[tokio::test]
 async fn adding_link_with_shortlink() {
     let test = "adding";
     let conf = default_config(test);
@@ -25,7 +27,7 @@ async fn adding_link_with_shortlink() {
     assert_eq!(reply.reason, "Short URL is already in use!");
 }
 
-#[test]
+#[tokio::test]
 async fn adding_link_with_shortlink_capital_letters() {
     let test = "adding-capital";
     let mut conf = default_config(test);
@@ -43,7 +45,7 @@ async fn adding_link_with_shortlink_capital_letters() {
     assert_eq!(reply.reason, "Short URL is already in use!");
 }
 
-#[test]
+#[tokio::test]
 async fn adding_link_with_generated_shortlink_with_pair_slug() {
     let test = "shortlink-with-pair-slug";
     let conf = default_config(test);
@@ -55,7 +57,7 @@ async fn adding_link_with_generated_shortlink_with_pair_slug() {
     assert!(re.is_match(reply.shortlink.as_str()));
 }
 
-#[test]
+#[tokio::test]
 async fn adding_link_with_generated_shortlink_with_uid_slug() {
     let test = "autogen-with-uid-slug";
     let mut conf = default_config(test);
@@ -69,26 +71,29 @@ async fn adding_link_with_generated_shortlink_with_uid_slug() {
     assert!(re.is_match(reply.shortlink.as_str()));
 }
 
-#[test]
+#[tokio::test]
 async fn empty_insertion() {
     let test = "batch-insertion";
     let conf = default_config(test);
     let (_tempdir, app) = create_app(&conf, test).await;
-    let req = test::TestRequest::post()
-        .uri("/api/new")
-        .insert_header(("X-API-Key", conf.api_key.unwrap()))
-        .set_payload("[]")
-        .to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/new")
+                .header("X-API-Key", conf.api_key.unwrap())
+                .body(Body::from("[]"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let status = resp.status();
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    let response: URLData = serde_json::from_str(body.as_str()).unwrap();
+    let response: URLData = serde_json::from_str(&body_string(resp).await).unwrap();
 
     assert!(status.is_client_error());
     assert_eq!(response.reason, "An empty array of links was provided!");
 }
 
-#[test]
+#[tokio::test]
 async fn bad_inserts() {
     let test = "bad-inserts";
     let conf = default_config(test);
@@ -103,20 +108,23 @@ async fn bad_inserts() {
         ("good1", "https://example.com", "note\x00"),
         ("good1", "https://example.com", "note\t"),
     ] {
-        let req = test::TestRequest::post()
-            .uri("/api/new")
-            .insert_header(("X-API-Key", api_key.clone()))
-            .set_payload(format!(
-                r#"{{"shortlink":"{shortlink}","longlink":"{longlink}","notes":"{notes}"}}"#
-            ))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        let status = resp.status();
-        assert!(status.is_client_error());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/new")
+                    .header("X-API-Key", api_key.clone())
+                    .body(Body::from(format!(
+                        r#"{{"shortlink":"{shortlink}","longlink":"{longlink}","notes":"{notes}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
     }
 }
 
-#[test]
+#[tokio::test]
 async fn bad_edits() {
     let test = "bad-edits";
     let conf = default_config(test);
@@ -139,36 +147,45 @@ async fn bad_edits() {
         assert!(resp.await.is_client_error());
     }
 
-    let req = test::TestRequest::put()
-        .uri("/api/edit")
-        .insert_header(("X-API-Key", api_key))
-        .set_payload(r#"[{"shortlink":"test1","longlink":"ftps://example.com/test1"}"#)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::put("/api/edit")
+                .header("X-API-Key", api_key)
+                .body(Body::from(
+                    r#"[{"shortlink":"test1","longlink":"ftps://example.com/test1"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(resp.status().is_client_error());
 }
 
-#[test]
+#[tokio::test]
 async fn batch_insertion() {
     let test = "batch-insertion";
     let mut conf = default_config(test);
     conf.slug_style = config::SlugStyle::Uid;
     conf.slug_length = 12;
     let (_tempdir, app) = create_app(&conf, test).await;
-    let req = test::TestRequest::post()
-        .uri("/api/new")
-        .insert_header(("X-API-Key", conf.api_key.unwrap()))
-        .set_payload(
-            r#"[{"shortlink":"test1","longlink":"https://example.com/test1"},
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/new")
+                .header("X-API-Key", conf.api_key.unwrap())
+                .body(Body::from(
+                    r#"[{"shortlink":"test1","longlink":"https://example.com/test1"},
         {"shortlink":"test2","longlink":"https://example.com/test2"},
         {"longlink":"https://example.com/test2", "expiry_delay": 10},
         {"shortlink":"test1","longlink":"https://example.com/test3"}]"#,
+                ))
+                .unwrap(),
         )
-        .to_request();
-    let resp = test::call_service(&app, req).await;
+        .await
+        .unwrap();
     let status = resp.status();
-    let body = to_bytes(resp.into_body()).await.unwrap();
-    let urls: Vec<URLData> = serde_json::from_str(body.as_str()).unwrap();
+    let urls: Vec<URLData> = serde_json::from_str(&body_string(resp).await).unwrap();
     let mut urls = urls.into_iter();
 
     assert!(status.is_success());
@@ -178,7 +195,7 @@ async fn batch_insertion() {
     assert_eq!(urls.next().unwrap().reason, "Short URL is already in use!");
 }
 
-#[test]
+#[tokio::test]
 async fn adding_link_with_generated_shortlink_with_uid_slug_capital_letters() {
     let test = "autogen-with-uid-slug-capital";
     let mut conf = default_config(test);
@@ -193,7 +210,7 @@ async fn adding_link_with_generated_shortlink_with_uid_slug_capital_letters() {
     assert!(re.is_match(reply.shortlink.as_str()));
 }
 
-#[test]
+#[tokio::test]
 async fn adding_link_with_retry_on_collision() {
     let test = "retry_on_collision";
     let mut conf = default_config(test);
@@ -234,24 +251,29 @@ async fn adding_link_with_retry_on_collision() {
     }
 }
 
-#[test]
+#[tokio::test]
 async fn adding_links_with_custom_protocol() {
     let test = "custom-protocols";
     let mut conf = default_config(test);
     conf.allowed_protocols.push("ftps".to_string());
     let (_tempdir, app) = create_app(&conf, test).await;
     let api_key = conf.api_key.clone().unwrap();
-    let req = test::TestRequest::post()
-        .uri("/api/new")
-        .insert_header(("X-API-Key", api_key.clone()))
-        .set_payload(r#"{{"shortlink":"test","longlink":"ftps://example.com","notes":"note"}}"#)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    let status = resp.status();
-    assert!(status.is_client_error());
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/new")
+                .header("X-API-Key", api_key.clone())
+                .body(Body::from(
+                    r#"{{"shortlink":"test","longlink":"ftps://example.com","notes":"note"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error());
 }
 
-#[test]
+#[tokio::test]
 async fn link_editing() {
     let test = "link-editing";
     let conf = default_config(test);
@@ -263,12 +285,18 @@ async fn link_editing() {
     let (status, _) = add_link(&app, &api_key, "test2", 10, "").await;
     assert!(status.is_success());
 
-    let req = test::TestRequest::get().uri("/test2").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/test2").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert!(resp.status().is_redirection());
 
-    let req = test::TestRequest::get().uri("/test1").to_request();
-    let resp = test::call_service(&app, req).await;
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/test1").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
 
     let timer = Duration::from_millis(800);
     sleep(timer).await;
